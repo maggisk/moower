@@ -138,7 +138,17 @@ header a.button {
   box-sizing: border-box;
   margin-left: 200px;
 }
+.frames-add,
+.frames-remove {
+  float: left;
+  width: 20px;
+  height: 20px;
+  border: 2px solid white;
+}
+
+
 .frame {
+  float : left;
   background: white;
   width: 80px;
   height: 80px;

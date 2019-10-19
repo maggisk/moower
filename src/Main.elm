@@ -6,11 +6,8 @@ import Html.Attributes exposing (id, class, classList, style, hidden, width, hei
 import Html.Events exposing (on, onClick, preventDefaultOn, custom)
 import Html.Lazy exposing (lazy)
 import File exposing (File)
-import File.Select as Select
 import Json.Decode as Decode
-import Json.Encode as Encode
 import Task
-import Dict
 import Canvas
 import Canvas exposing (rect, shapes)
 import Canvas.Settings exposing (fill)
@@ -19,6 +16,13 @@ import Canvas.Texture as Texture exposing (Texture)
 import Maybe exposing (andThen, withDefault)
 import Debug exposing (log, toString)
 import Color
+import ListExtras exposing (getAt, insertAt, updateAt, deleteAt)
+import Point exposing (Point)
+import Rect exposing (Rect)
+import Animation exposing (Animation, Layer, Frame, FrameLayer, Easing,
+  new, seek, forward, newFrame, addFrame, updateFrame, deleteFrame,
+  newLayer, deleteLayer, updateLayer, findLayer, updateFrameLayer,
+  easingEnum, ease)
 
 
 -- MAIN
@@ -36,35 +40,16 @@ main =
 -- MODEL
 
 
-type Easing
-  = Linear
-  | EaseIn
-  | EaseOut
-
-easingEnum = [Linear, EaseIn, EaseOut]
-
-ease : Easing -> Float -> Float
-ease which t =
-  case which of
-    Linear ->
-      t
-    EaseIn ->
-      t^2
-    EaseOut ->
-      1 - (t - 1)^2
-
-
--- why our own mouse event type? because we want the `buttons`, `movementX` and `movementY` properties
--- of mouseevents that elm-pointer-events doesn't provide because safari doesn't support it
 type alias MouseEvent =
-  { buttons : Int
+  { button : Int
+  , buttons : Int
   , movementX : Float
   , movementY : Float
   , clientX : Float
   , clientY : Float
   , altKey : Bool
   , ctrlKey : Bool
-  , metaKey : Bool
+  --, metaKey : Bool
   }
 
 
@@ -74,55 +59,15 @@ type alias LayerLoading =
   }
 
 
-type alias Layer =
-  { id : Int
-  , texture : Texture
-  , name : String
-  , base64 : String
-  }
-
-
-type alias FrameLayer =
-  { layerId : Int
-  , x : Float
-  , y : Float
-  , texture : Texture
-  , angle : Float
-  , easing : Easing
-  }
-
-newFrameLayer id texture =
-  FrameLayer id 0.0 0.0 texture 0.0 Linear
-
-
-type alias Frame =
-  { id : Int
-  , duration : Float
-  , easing : Easing
-  , layers : List FrameLayer
-  }
-
-
-type alias Rect =
-  { x : Float
-  , y : Float
-  , width : Float
-  , height : Float
-   }
-
-
 type alias Model =
   { dropping : Bool
   , playing : Bool
-  , identity : Int
-  , elapsed : Float
   , canvas : Rect
   , queued : List LayerLoading
-  , frames : List Frame
-  , selectedFrameId : Int
-  , layers : List Layer
-  , selectedLayerId : Int
-  , error : String
+  , animation : Animation
+  , currentFrameIdx : Int
+  , currentLayerIdx : Int
+  , error : Maybe String
   }
 
 
@@ -131,15 +76,12 @@ init _ =
   ( Model
       False -- dropping
       False -- playing
-      1 -- identity
-      0.0 -- elapsed
       (Rect 0.0 0.0 0.0 0.0) -- canvas
       [] -- queued
-      [Frame 0 0.3 Linear []] -- frames
-      0 -- selectedFrameId
-      [] -- layers
-      -1 -- selectedLayerId
-      "" -- error
+      Animation.new -- animation
+      0 -- currentFrameIdx
+      0 -- currentLayerIdx
+      Nothing -- error
   , Task.attempt CanvasRect (getElement "animation")
   )
 
@@ -156,12 +98,15 @@ type Msg
   | FilesDropped File (List File)
   | FilesReady (List String) (List String)
   | TextureLoaded LayerLoading (Maybe Texture)
-  | SelectLayer Layer
-  | DeleteLayer Layer
-  | SelectFrame Frame
+  | SelectLayer Int
+  | DeleteLayer Int
+  | NewFrame
+  | SelectFrame Int
+  | DeleteFrame Int
   | TogglePlay
   | OnWindowResize Int Int
   | CanvasRect (Result Error Element)
+  | CanvasMouseDown MouseEvent
   | MouseMoved MouseEvent
 
 
@@ -172,7 +117,7 @@ update msg model =
       ( model, Cmd.none )
 
     AnimationFrame delta ->
-      ( { model | elapsed = model.elapsed + delta }
+      ( { model | animation = forward delta model.animation }
       , Cmd.none
       )
 
@@ -208,54 +153,53 @@ update msg model =
 
     TextureLoaded loading (Just texture) ->
       -- 3) finally all done and we can create the layer record
-      let
-        newLayer =
-          (Layer model.identity texture loading.name loading.base64)
-        addFrameLayer frame =
-          { frame | layers = (newFrameLayer model.identity texture) :: frame.layers }
-      in
       ( { model
-        | identity = model.identity + 1
-        , queued = List.filter ((/=) loading) model.queued
-        , layers = newLayer :: model.layers
-        , selectedLayerId = model.identity
-        , frames = List.map addFrameLayer model.frames
+        | queued = List.filter ((/=) loading) model.queued
+        , animation = newLayer (Layer texture loading.name loading.base64) model.animation
         }
       , Cmd.none
       )
 
     TextureLoaded { name } Nothing ->
-      ( { model | error = "Failed to convert image: " ++ name }
+      ( { model | error = Just ("Failed to convert image: " ++ name) }
       , Cmd.none
       )
 
-    SelectLayer layer ->
-      ( model, Cmd.none )
-
-    DeleteLayer layer ->
-      let
-        deleteFromFrame frame =
-          { frame | layers = List.filter (\l -> l.layerId /= layer.id) frame.layers }
-      in
-        ( { model
-          | layers = List.filter ((/=) layer) model.layers
-          , frames = List.map deleteFromFrame model.frames
-          }
-        , Cmd.none
-        )
-
-    SelectFrame frame ->
-      ( model
+    SelectLayer idx ->
+      ( { model | currentLayerIdx = clamp idx 0 (List.length model.animation.layers) }
       , Cmd.none
       )
+
+    DeleteLayer idx ->
+      { model | animation = deleteLayer idx model.animation }
+      |> update (SelectLayer model.currentLayerIdx)
+
+    NewFrame ->
+      case newFrame model.currentFrameIdx model.animation of
+        Just animation ->
+          { model | animation = animation }
+          |> update (SelectFrame (model.currentFrameIdx + 1))
+        Nothing ->
+          ( model, Cmd.none )
+
+    SelectFrame idx ->
+      ( { model | currentFrameIdx = clamp idx 0 (List.length model.animation.frames) }
+      , Cmd.none
+      )
+
+    DeleteFrame idx ->
+      { model | animation = deleteFrame model.currentFrameIdx model.animation }
+      |> update (SelectFrame model.currentFrameIdx)
 
     TogglePlay ->
-      ( { model | playing = not model.playing, elapsed = 0.0 }
+      ( { model
+        | playing = not model.playing
+        , animation = seek 0.0 model.animation
+        }
       , Cmd.none
       )
 
     OnWindowResize _ _ ->
-      -- TODO: can you chain commands without going through the update function? this seems silly
       ( model
       , Task.attempt CanvasRect (getElement "animation")
       )
@@ -266,20 +210,46 @@ update msg model =
       )
 
     CanvasRect (Err error) ->
-      ( { model | error = log "error getting size for canvas" (Debug.toString error) }
+      ( { model | error = Just (log "error getting size for canvas" (Debug.toString error)) }
       , Cmd.none
       )
 
+    CanvasMouseDown e ->
+      let
+        clickedLayerIdx =
+          if e.buttons == 1
+          then findLayer (toCanvasCoords (mouseToPoint e) model.canvas) model.currentFrameIdx model.animation
+          else Nothing
+      in
+        ( { model | currentLayerIdx = clickedLayerIdx |> withDefault model.currentLayerIdx }
+        , Cmd.none
+        )
+
     MouseMoved e ->
-      ( case e.buttons of
-          1 -> updateFrameLayer model (moveLayer e)
-          2 -> updateFrameLayer model (rotateLayer e model.canvas)
-          _ -> model
-      , Cmd.none )
+      let
+          updateCurrentFrameLayer fn =
+            { model | animation = updateFrameLayer model.currentFrameIdx model.currentLayerIdx fn model.animation }
+      in
+        ( case e.buttons of
+            1 -> updateCurrentFrameLayer (moveLayerCoords e)
+            2 -> updateCurrentFrameLayer (rotateLayer e model.canvas)
+            _ -> model
+        , Cmd.none )
 
 
-moveLayer : MouseEvent -> FrameLayer -> FrameLayer
-moveLayer e fl =
+toCanvasCoords : Point -> Rect -> Point
+toCanvasCoords screen canvas =
+  let center = Rect.center canvas
+  in Point (screen.x - center.x) (screen.y - center.y)
+
+
+mouseToPoint : MouseEvent -> Point
+mouseToPoint event =
+  Point event.clientX event.clientY
+
+
+moveLayerCoords : MouseEvent -> FrameLayer -> FrameLayer
+moveLayerCoords e fl =
   { fl | x = fl.x + e.movementX, y = fl.y + e.movementY }
 
 
@@ -291,45 +261,6 @@ rotateLayer e canvas fl =
     rotation = (atan2 (y + e.movementY) (x + e.movementX)) - (atan2 y x)
   in
     { fl | angle = fl.angle + rotation }
-
-
-zip : (List a) -> (List b) -> (List (a, b))
-zip = List.map2 Tuple.pair
-
-
-findBy : (a -> b) -> (b -> Bool) -> (List a) -> Maybe a
-findBy transform predicate list =
-  List.filter (transform >> predicate) list |> List.head
-
-
-updateIf : (a -> Bool) -> (a -> a) -> List a -> List a
-updateIf predicate transform list =
-  let
-    maybeUpdate x =
-      if predicate x
-      then transform x
-      else x
-  in
-    List.map maybeUpdate list
-
-
-updateFrame : Model -> (Frame -> Frame) -> Model
-updateFrame model transform =
-  { model | frames = updateIf (\f -> f.id == model.selectedFrameId) transform model.frames }
-
-
-updateLayer : Model -> (Layer -> Layer) -> Model
-updateLayer model transform =
-  { model | layers = updateIf (\l -> l.id == model.selectedLayerId) transform model.layers }
-
-
-updateFrameLayer : Model -> (FrameLayer -> FrameLayer) -> Model
-updateFrameLayer model transform =
-  let
-    updateFrameLayers frame =
-      { frame | layers = updateIf (\l -> l.layerId == model.selectedLayerId) transform frame.layers }
-  in
-    { model | frames = updateIf (\f -> f.id == model.selectedFrameId) updateFrameLayers model.frames }
 
 
 
@@ -375,14 +306,18 @@ viewHeader =
 viewSidebar : Model -> Html Msg
 viewSidebar model =
   let
-    button layer =
+    button idx layer =
       div
-        [class "sidebar-layer"]
-        [ a [class "button"] [text layer.name]
-        , a [class "sidebar-deleteLayer", onClick (DeleteLayer layer)] []
+        [ class "sidebar-layer" ]
+        [ a
+            [ classList [("button", True), ("button-selected", idx == model.currentLayerIdx)]
+            , onClick (SelectLayer idx)
+            ]
+            [ text layer.name ]
+        , a [ class "sidebar-deleteLayer", onClick (DeleteLayer idx) ] []
         ]
   in
-  section [class "sidebar"] (List.map button model.layers)
+  section [class "sidebar"] (List.indexedMap button model.animation.layers)
 
 
 viewAnimation : Model -> Html Msg
@@ -390,20 +325,21 @@ viewAnimation model =
   div
     [ id "animation"
     , class "animation"
+    , on "mousedown" (Decode.map CanvasMouseDown mouseEventDecoder)
     , on "mousemove" (Decode.map MouseMoved mouseEventDecoder)
     , preventDefaultOn "contextmenu" (Decode.succeed (NoOp, True))
     ]
     [ viewCanvas model
     , div
       [ class "animation-empty"
-      , hidden (model.layers /= [])
+      , hidden (model.animation.layers /= [])
       ]
       [text "Drop images here to get started"]
     , div
       [ classList
           [ ("animation-dropzone", True)
           , ("animation-dropzone-dropping", model.dropping)
-          , ("animation-dropzone-empty", List.isEmpty model.layers)
+          , ("animation-dropzone-empty", List.isEmpty model.animation.layers)
           ]
       , preventDefaultOn "dragenter" (Decode.succeed (OnDragEnter, True))
       , preventDefaultOn "dragover" (Decode.succeed (OnDragEnter, True))
@@ -421,7 +357,7 @@ viewAnimation model =
       []
     , div
         [ class "animation-duration" ]
-        [ text (String.fromFloat model.elapsed) ]
+        [ text (String.fromFloat model.animation.elapsed) ]
     ]
 
 
@@ -435,12 +371,12 @@ viewCanvas model =
     load layer =
       Texture.loadFromImageUrl layer.base64 (TextureLoaded layer)
     framelayers =
-      findBy .id ((==) model.selectedFrameId) model.frames
+      getAt model.currentFrameIdx model.animation.frames
         |> andThen (.layers >> Just)
-        |> withDefault [] 
+        |> withDefault []
     draw fl =
       let { width, height } = Texture.dimensions fl.texture
-      in Canvas.texture [transform [center, (translate fl.x fl.y), (rotate fl.angle)]] (-width/2, -height/2) fl.texture
+      in Canvas.texture [transform [center, (translate fl.x fl.y), (rotate fl.angle)]] (-width / 2, -height / 2) fl.texture
   in
   Canvas.toHtmlWith
     { width = floor model.canvas.width
@@ -465,12 +401,16 @@ viewPlayButton isPlaying =
 
 viewFrames : Model -> Html Msg
 viewFrames model =
-  div [class "frames"] (List.map viewFrame model.frames)
+  div [class "frames"]
+    [ div [] (List.indexedMap viewFrame model.animation.frames)
+    , div [ class "frames-add", onClick NewFrame ] []
+    , div [ class "frames-remove", onClick (DeleteFrame model.currentFrameIdx) ] []
+    ]
 
 
-viewFrame : Frame -> Html Msg
-viewFrame frame =
-  div [class "frame", onClick (SelectFrame frame)] []
+viewFrame : Int -> Frame -> Html Msg
+viewFrame idx frame =
+  div [class "frame", onClick (SelectFrame idx)] []
 
 
 
@@ -480,6 +420,7 @@ viewFrame frame =
 mouseEventDecoder : Decode.Decoder MouseEvent
 mouseEventDecoder =
   Decode.map8 MouseEvent
+    (Decode.field "button" Decode.int)
     (Decode.field "buttons" Decode.int)
     (Decode.field "movementX" Decode.float)
     (Decode.field "movementY" Decode.float)
@@ -487,7 +428,7 @@ mouseEventDecoder =
     (Decode.field "clientY" Decode.float)
     (Decode.field "altKey" Decode.bool)
     (Decode.field "ctrlKey" Decode.bool)
-    (Decode.field "metaKey" Decode.bool)
+    --(Decode.field "metaKey" Decode.bool)
 
 
 dropDecoder : Decode.Decoder Msg
