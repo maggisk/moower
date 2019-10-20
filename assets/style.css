@@ -35,9 +35,11 @@ header a.button {
   min-height: 1px;
   float: left;
   width: 200px;
+  transform-style: preserve-3d;
 }
 .sidebar-layer {
   position: relative;
+  transform: translate(0px, 0px);
 }
 .sidebar-deleteLayer {
   position: absolute;

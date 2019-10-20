@@ -1,10 +1,10 @@
 module Animation exposing (Animation, Layer, Frame, FrameLayer, Easing,
-  new, seek, forward, newFrame, addFrame, updateFrame, deleteFrame,
-  newLayer, deleteLayer, updateLayer, findLayer, updateFrameLayer,
+  new, seek, forward, newFrame, addFrame, updateFrame, deleteFrame, changeFrameOrder,
+  newLayer, deleteLayer, updateLayer, changeLayerOrder, findLayer, updateFrameLayer,
   easingEnum, ease)
 
 import Canvas.Texture as Texture exposing (Texture)
-import ListExtras exposing (getAt, updateAt, deleteAt)
+import ListExtras exposing (getAt, updateAt, deleteAt, reinsert)
 import Point exposing (Point)
 import Rect exposing (Rect)
 
@@ -77,6 +77,11 @@ deleteFrame idx animation =
   else animation
 
 
+changeFrameOrder : Int -> Int -> Animation -> Animation
+changeFrameOrder from to animation =
+  { animation | frames = reinsert from to animation.frames }
+
+
 newLayer : Layer -> Animation -> Animation
 newLayer layer animation =
   let
@@ -100,6 +105,18 @@ deleteLayer idx animation =
 updateLayer : Int -> (Layer -> Layer) -> Animation -> Animation
 updateLayer layerIdx transform animation =
   { animation | layers = updateAt layerIdx transform animation.layers }
+
+
+changeLayerOrder : Int -> Int -> Animation -> Animation
+changeLayerOrder from to animation =
+  let
+    changeFrame frame =
+      { frame | layers = reinsert from to frame.layers }
+  in
+    { animation
+    | frames = List.map changeFrame animation.frames
+    , layers = reinsert from to animation.layers
+    }
 
 
 findLayer : Point -> Int -> Animation -> Maybe Int

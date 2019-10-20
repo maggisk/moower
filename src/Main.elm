@@ -1,5 +1,5 @@
 import Browser
-import Browser.Events exposing (onResize, onAnimationFrameDelta)
+import Browser.Events exposing (onResize, onAnimationFrameDelta, onMouseMove, onMouseUp)
 import Browser.Dom exposing (Element, Error, getElement)
 import Html exposing (..)
 import Html.Attributes exposing (id, class, classList, style, hidden, width, height)
@@ -43,19 +43,37 @@ main =
 type alias MouseEvent =
   { button : Int
   , buttons : Int
-  , movementX : Float
-  , movementY : Float
-  , clientX : Float
-  , clientY : Float
+  , movement : Point
+  , client: Point
   , altKey : Bool
   , ctrlKey : Bool
-  --, metaKey : Bool
+  , metaKey : Bool
   }
 
 
 type alias LayerLoading =
   { name : String
   , base64 : String
+  }
+
+
+type Draggable
+  = DragLayer
+  | DragFrame
+
+
+type Direction
+  = Horizontal
+  | Vertical
+
+
+type alias Drag =
+  { idx : Int
+  , which : Draggable
+  , direction : Direction
+  , mouseStart : Point
+  , mouseAt : Point
+  , size : Int
   }
 
 
@@ -67,6 +85,7 @@ type alias Model =
   , animation : Animation
   , currentFrameIdx : Int
   , currentLayerIdx : Int
+  , drag : Maybe Drag
   , error : Maybe String
   }
 
@@ -81,6 +100,7 @@ init _ =
       Animation.new -- animation
       0 -- currentFrameIdx
       0 -- currentLayerIdx
+      Nothing -- drag
       Nothing -- error
   , Task.attempt CanvasRect (getElement "animation")
   )
@@ -107,7 +127,10 @@ type Msg
   | OnWindowResize Int Int
   | CanvasRect (Result Error Element)
   | CanvasMouseDown MouseEvent
-  | MouseMoved MouseEvent
+  | CanvasMouseMoved MouseEvent
+  | DragStart Int Int Draggable Direction MouseEvent
+  | DragMove MouseEvent
+  | DragEnd MouseEvent
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
@@ -225,7 +248,7 @@ update msg model =
         , Cmd.none
         )
 
-    MouseMoved e ->
+    CanvasMouseMoved e ->
       let
           updateCurrentFrameLayer fn =
             { model | animation = updateFrameLayer model.currentFrameIdx model.currentLayerIdx fn model.animation }
@@ -236,6 +259,93 @@ update msg model =
             _ -> model
         , Cmd.none )
 
+    DragStart idx size which direction event ->
+      let
+        mouse = mouseToPoint event
+      in
+        ( { model | drag = Just (Drag idx which direction mouse mouse size) }
+        , Cmd.none
+        )
+
+    DragMove event ->
+      let
+        updateMousePos drag =
+          { drag | mouseAt = mouseToPoint event }
+      in
+        ( { model | drag = model.drag |> andThen (updateMousePos >> Just) }
+        , Cmd.none
+        )
+
+    DragEnd event ->
+      ( case model.drag of
+          Just drag ->
+            let
+              fn = draggableUpdateFunc drag
+              newIdx = drag.idx + (dragDistanceUnits drag)
+            in
+              { model
+              | animation = fn drag.idx newIdx model.animation
+              , drag = Nothing
+              }
+          Nothing ->
+            model
+      , Cmd.none
+      )
+
+
+draggableUpdateFunc : Drag -> (Int -> Int -> Animation -> Animation)
+draggableUpdateFunc drag =
+  case drag.which of
+    DragLayer ->
+      Animation.changeLayerOrder
+    DragFrame ->
+      Animation.changeFrameOrder
+
+
+trans : Direction -> Int -> String
+trans dir px =
+  String.concat
+    [ case dir of
+        Horizontal -> "translateX("
+        Vertical   -> "translateY("
+    , String.fromInt px
+    , "px)"
+    ]
+
+
+draggableStyle : Int -> Draggable -> (Maybe Drag) -> Attribute Msg
+draggableStyle idx which maybeDrag =
+  case maybeDrag of
+    Just drag ->
+      let
+        diffUnits = dragDistanceUnits drag
+        diffPixels = dragDistancePixels drag
+      in
+        if drag.idx == idx && drag.which == which then
+          style "transform" ((trans drag.direction diffPixels) ++ " translateZ(10px)")
+        else if idx < drag.idx && drag.idx + diffUnits <= idx then
+          style "transform" (trans drag.direction drag.size)
+        else if idx > drag.idx && drag.idx + diffUnits >= idx then
+          style "transform" (trans drag.direction -drag.size)
+        else
+          style "" ""
+    Nothing ->
+      style "" ""
+
+
+dragDistancePixels : Drag -> Int
+dragDistancePixels drag =
+  case drag.direction of
+    Horizontal ->
+      round (drag.mouseAt.x - drag.mouseStart.x)
+    Vertical ->
+      round (drag.mouseAt.y - drag.mouseStart.y)
+
+
+dragDistanceUnits : Drag -> Int
+dragDistanceUnits drag =
+  (dragDistancePixels drag) // drag.size
+
 
 toCanvasCoords : Point -> Rect -> Point
 toCanvasCoords screen canvas =
@@ -245,20 +355,20 @@ toCanvasCoords screen canvas =
 
 mouseToPoint : MouseEvent -> Point
 mouseToPoint event =
-  Point event.clientX event.clientY
+  Point event.client.x event.client.y
 
 
 moveLayerCoords : MouseEvent -> FrameLayer -> FrameLayer
 moveLayerCoords e fl =
-  { fl | x = fl.x + e.movementX, y = fl.y + e.movementY }
+  { fl | x = fl.x + e.movement.x, y = fl.y + e.movement.y }
 
 
 rotateLayer : MouseEvent -> Rect -> FrameLayer -> FrameLayer
 rotateLayer e canvas fl =
   let
-    x = e.clientX - canvas.x - canvas.width / 2 - fl.x
-    y = e.clientY - canvas.y - canvas.height / 2 - fl.y
-    rotation = (atan2 (y + e.movementY) (x + e.movementX)) - (atan2 y x)
+    x = e.client.x - canvas.x - canvas.width / 2 - fl.x
+    y = e.client.y - canvas.y - canvas.height / 2 - fl.y
+    rotation = (atan2 (y + e.movement.y) (x + e.movement.x)) - (atan2 y x)
   in
     { fl | angle = fl.angle + rotation }
 
@@ -274,7 +384,14 @@ subscriptions model =
     , if model.playing
       then onAnimationFrameDelta AnimationFrame
       else Sub.none
+    , if model.drag /= Nothing
+      then Sub.batch
+        [ onMouseMove (Decode.map DragMove mouseEventDecoder)
+        , onMouseUp (Decode.map DragEnd mouseEventDecoder)
+        ]
+      else Sub.none
     ]
+ 
 
 
 -- VIEW
@@ -308,10 +425,14 @@ viewSidebar model =
   let
     button idx layer =
       div
-        [ class "sidebar-layer" ]
+        [ class "sidebar-layer"
+        , draggableStyle idx DragLayer model.drag
+        ]
         [ a
             [ classList [("button", True), ("button-selected", idx == model.currentLayerIdx)]
             , onClick (SelectLayer idx)
+            , on "mousedown" (Decode.map (DragStart idx 30 DragLayer Vertical) mouseEventDecoder)
+            , preventDefaultOn "selectstart" (Decode.succeed (NoOp, True))
             ]
             [ text layer.name ]
         , a [ class "sidebar-deleteLayer", onClick (DeleteLayer idx) ] []
@@ -326,7 +447,7 @@ viewAnimation model =
     [ id "animation"
     , class "animation"
     , on "mousedown" (Decode.map CanvasMouseDown mouseEventDecoder)
-    , on "mousemove" (Decode.map MouseMoved mouseEventDecoder)
+    , on "mousemove" (Decode.map CanvasMouseMoved mouseEventDecoder)
     , preventDefaultOn "contextmenu" (Decode.succeed (NoOp, True))
     ]
     [ viewCanvas model
@@ -419,16 +540,21 @@ viewFrame idx frame =
 
 mouseEventDecoder : Decode.Decoder MouseEvent
 mouseEventDecoder =
-  Decode.map8 MouseEvent
+  Decode.map7 MouseEvent
     (Decode.field "button" Decode.int)
     (Decode.field "buttons" Decode.int)
-    (Decode.field "movementX" Decode.float)
-    (Decode.field "movementY" Decode.float)
-    (Decode.field "clientX" Decode.float)
-    (Decode.field "clientY" Decode.float)
+    (Decode.at [] (decodePoint "movementX" "movementY"))
+    (Decode.at [] (decodePoint "clientX" "clientY"))
     (Decode.field "altKey" Decode.bool)
     (Decode.field "ctrlKey" Decode.bool)
-    --(Decode.field "metaKey" Decode.bool)
+    (Decode.field "metaKey" Decode.bool)
+
+
+decodePoint : String -> String -> Decode.Decoder Point
+decodePoint x y =
+  Decode.map2 Point
+    (Decode.field x Decode.float)
+    (Decode.field y Decode.float)
 
 
 dropDecoder : Decode.Decoder Msg
