@@ -1,3 +1,6 @@
+module Main exposing (..)
+
+
 import Browser
 import Browser.Events exposing (onResize, onAnimationFrameDelta, onMouseMove, onMouseUp)
 import Browser.Dom exposing (Element, Error, getElement)
@@ -262,14 +265,14 @@ toCanvasCoords screen canvas =
 
 moveLayerCoords : MouseEvent -> FrameLayer -> FrameLayer
 moveLayerCoords e fl =
-  { fl | x = fl.x + e.movement.x, y = fl.y + e.movement.y }
+  { fl | pos = Point (fl.pos.x + e.movement.x) (fl.pos.y + e.movement.y) }
 
 
 rotateLayer : MouseEvent -> Rect -> FrameLayer -> FrameLayer
 rotateLayer e canvas fl =
   let
-    x = e.client.x - canvas.x - canvas.width / 2 - fl.x
-    y = e.client.y - canvas.y - canvas.height / 2 - fl.y
+    x = e.client.x - canvas.x - canvas.width / 2 - fl.pos.x
+    y = e.client.y - canvas.y - canvas.height / 2 - fl.pos.y
     rotation = (atan2 (y + e.movement.y) (x + e.movement.x)) - (atan2 y x)
   in
     { fl | angle = fl.angle + rotation }
@@ -382,27 +385,19 @@ viewAnimation model =
 viewCanvas : Model -> Html Msg
 viewCanvas model =
   let
-    clear =
-      shapes [ fill Color.white ] [ rect (0, 0) model.canvas.width model.canvas.height ]
-    center =
-      translate (model.canvas.width / 2) (model.canvas.height / 2)
+    clear = shapes [ fill Color.white ] [ rect (0, 0) model.canvas.width model.canvas.height ]
+    center = Point (model.canvas.width / 2) (model.canvas.height / 2)
+
     load layer =
       Texture.loadFromImageUrl layer.base64 (TextureLoaded layer)
-    framelayers =
-      getAt model.currentFrameIdx model.animation.frames
-        |> andThen (.layers >> Just)
-        |> withDefault []
-    draw fl =
-      let { width, height } = Texture.dimensions fl.texture
-      in Canvas.texture [transform [center, (translate fl.x fl.y), (rotate fl.angle)]] (-width / 2, -height / 2) fl.texture
+
+    options =
+      { width = floor model.canvas.width
+      , height = floor model.canvas.height
+      , textures = List.map load model.queued
+      }
   in
-  Canvas.toHtmlWith
-    { width = floor model.canvas.width
-    , height = floor model.canvas.height
-    , textures = List.map load model.queued
-    }
-    []
-    (clear :: (List.map draw framelayers))
+  Canvas.toHtmlWith options [] (clear :: (Animation.draw center model.animation))
 
 
 viewPlayButton : Bool -> Html Msg

@@ -1,10 +1,13 @@
 module Animation exposing (Animation, Layer, Frame, FrameLayer, Easing,
   new, seek, forward, newFrame, addFrame, updateFrame, deleteFrame, changeFrameOrder,
   newLayer, deleteLayer, updateLayer, changeLayerOrder, findLayer, updateFrameLayer,
-  easingEnum, ease)
+  easingEnum, ease,
+  draw)
 
+import Canvas exposing (Renderable, texture)
 import Canvas.Texture as Texture exposing (Texture)
-import ListExtras exposing (getAt, updateAt, deleteAt, reinsert)
+import Canvas.Settings.Advanced as Adv
+import ListExtras exposing (getAt, updateAt, deleteAt, reinsert, zip)
 import Point exposing (Point)
 import Rect exposing (Rect)
 
@@ -31,9 +34,10 @@ type alias Frame =
 
 
 type alias FrameLayer =
-  { x : Float
-  , y : Float
+  { pos : Point
+  , scale : Point
   , angle : Float
+  , alpha : Float
   , easing : Easing
   , texture : Texture
   }
@@ -86,7 +90,7 @@ newLayer : Layer -> Animation -> Animation
 newLayer layer animation =
   let
     addFrameLayer frame =
-      { frame | layers = (FrameLayer 0.0 0.0 0.0 Linear layer.texture) :: frame.layers }
+      { frame | layers = (FrameLayer (Point 0.0 0.0) (Point 1.0 1.0) 0.0 1.0 Linear layer.texture) :: frame.layers }
   in
     { animation
     | layers = layer :: animation.layers
@@ -135,7 +139,7 @@ getIndexIfInside : Point -> (Int, FrameLayer) -> Maybe Int
 getIndexIfInside pos (i, layer) =
   let
     { width, height } = Texture.dimensions layer.texture
-    rect = Rect (layer.x - width / 2) (layer.y - height / 2) width height
+    rect = Rect (layer.pos.x - width / 2) (layer.pos.y - height / 2) width height
   in
     if Rect.contains layer.angle pos rect
     then Just i
@@ -167,3 +171,58 @@ ease easing t =
       t^2
     EaseOut ->
       1 - (t - 1)^2
+
+
+draw : Point -> Animation -> List Renderable
+draw center animation =
+  drawAt center animation.elapsed animation
+
+
+drawAt : Point -> Float -> Animation -> List Renderable
+drawAt center time animation =
+  findFrames time animation.frames
+  |> Maybe.andThen (\(passed, f1, f2) -> Just (drawExact center passed f1 f2))
+  |> Maybe.withDefault []
+
+
+findFrames : Float -> List Frame -> Maybe (Float, Frame, Frame)
+findFrames time frames =
+  case frames of
+    f1 :: f2 :: rest ->
+      if time < f1.duration
+      then Just (time, f1, f2)
+      else findFrames (time - f1.duration) (f2 :: rest)
+    last :: rest ->
+      Just (time, last, last)
+    _ ->
+      Nothing
+
+
+drawExact : Point -> Float -> Frame -> Frame -> List Renderable
+drawExact center passed this next =
+  List.map2 (drawExactLayer center (passed / this.duration)) this.layers next.layers
+
+
+drawExactLayer : Point -> Float -> FrameLayer -> FrameLayer -> Renderable
+drawExactLayer center percent this next =
+  let
+    thisPos = ease this.easing percent
+    nextPos = 1 - thisPos
+
+    adjust toVal =
+      ((toVal this) * thisPos) + ((toVal next) * nextPos)
+
+    { width, height } = Texture.dimensions this.texture
+
+    x = ((adjust (.pos >> .x)) - width / 2)
+    y = ((adjust (.pos >> .y)) - height / 2)
+
+    transforms =
+      [ Adv.translate (center.x + x) (center.y + y)
+      , Adv.scale (adjust (.scale >> .x)) (adjust (.scale >> .y))
+      ]
+
+    settings =
+      [ Adv.alpha (adjust .alpha), Adv.transform transforms ]
+  in
+    texture settings (0.0, 0.0) this.texture
