@@ -19,6 +19,8 @@ import Color
 import ListExtras exposing (getAt, insertAt, updateAt, deleteAt)
 import Point exposing (Point)
 import Rect exposing (Rect)
+import Events exposing (MouseEvent, mouseEventDecoder)
+import Orderable exposing (Direction(..), draggableAttributes, containerStyle)
 import Animation exposing (Animation, Layer, Frame, FrameLayer, Easing,
   new, seek, forward, newFrame, addFrame, updateFrame, deleteFrame,
   newLayer, deleteLayer, updateLayer, findLayer, updateFrameLayer,
@@ -40,41 +42,15 @@ main =
 -- MODEL
 
 
-type alias MouseEvent =
-  { button : Int
-  , buttons : Int
-  , movement : Point
-  , client: Point
-  , altKey : Bool
-  , ctrlKey : Bool
-  , metaKey : Bool
-  }
-
-
 type alias LayerLoading =
   { name : String
   , base64 : String
   }
 
 
-type Draggable
-  = DragLayer
-  | DragFrame
-
-
-type Direction
-  = Horizontal
-  | Vertical
-
-
-type alias Drag =
-  { idx : Int
-  , which : Draggable
-  , direction : Direction
-  , mouseStart : Point
-  , mouseAt : Point
-  , size : Int
-  }
+type OrderableType
+  = OrderLayer
+  | OrderFrame
 
 
 type alias Model =
@@ -85,7 +61,7 @@ type alias Model =
   , animation : Animation
   , currentFrameIdx : Int
   , currentLayerIdx : Int
-  , drag : Maybe Drag
+  , reOrder : Maybe (Orderable.State OrderableType)
   , error : Maybe String
   }
 
@@ -100,7 +76,7 @@ init _ =
       Animation.new -- animation
       0 -- currentFrameIdx
       0 -- currentLayerIdx
-      Nothing -- drag
+      Nothing -- reOrder
       Nothing -- error
   , Task.attempt CanvasRect (getElement "animation")
   )
@@ -128,9 +104,7 @@ type Msg
   | CanvasRect (Result Error Element)
   | CanvasMouseDown MouseEvent
   | CanvasMouseMoved MouseEvent
-  | DragStart Int Int Draggable Direction MouseEvent
-  | DragMove MouseEvent
-  | DragEnd MouseEvent
+  | OrderableMsg (Orderable.Msg OrderableType)
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
@@ -241,7 +215,7 @@ update msg model =
       let
         clickedLayerIdx =
           if e.buttons == 1
-          then findLayer (toCanvasCoords (mouseToPoint e) model.canvas) model.currentFrameIdx model.animation
+          then findLayer (toCanvasCoords (e.client) model.canvas) model.currentFrameIdx model.animation
           else Nothing
       in
         ( { model | currentLayerIdx = clickedLayerIdx |> withDefault model.currentLayerIdx }
@@ -259,103 +233,31 @@ update msg model =
             _ -> model
         , Cmd.none )
 
-    DragStart idx size which direction event ->
-      let
-        mouse = mouseToPoint event
-      in
-        ( { model | drag = Just (Drag idx which direction mouse mouse size) }
-        , Cmd.none
-        )
-
-    DragMove event ->
-      let
-        updateMousePos drag =
-          { drag | mouseAt = mouseToPoint event }
-      in
-        ( { model | drag = model.drag |> andThen (updateMousePos >> Just) }
-        , Cmd.none
-        )
-
-    DragEnd event ->
-      ( case model.drag of
-          Just drag ->
-            let
-              fn = draggableUpdateFunc drag
-              newIdx = drag.idx + (dragDistanceUnits drag)
-            in
-              { model
-              | animation = fn drag.idx newIdx model.animation
-              , drag = Nothing
-              }
-          Nothing ->
-            model
+    OrderableMsg (Orderable.Apply state newIdx) ->
+      ( { model | animation = (draggableUpdateFunc state.which) state.idx newIdx model.animation }
       , Cmd.none
       )
 
-
-draggableUpdateFunc : Drag -> (Int -> Int -> Animation -> Animation)
-draggableUpdateFunc drag =
-  case drag.which of
-    DragLayer ->
-      Animation.changeLayerOrder
-    DragFrame ->
-      Animation.changeFrameOrder
-
-
-trans : Direction -> Int -> String
-trans dir px =
-  String.concat
-    [ case dir of
-        Horizontal -> "translateX("
-        Vertical   -> "translateY("
-    , String.fromInt px
-    , "px)"
-    ]
-
-
-draggableStyle : Int -> Draggable -> (Maybe Drag) -> Attribute Msg
-draggableStyle idx which maybeDrag =
-  case maybeDrag of
-    Just drag ->
+    OrderableMsg reMsg ->
       let
-        diffUnits = dragDistanceUnits drag
-        diffPixels = dragDistancePixels drag
+        (reOrder, cmd) = Orderable.update OrderableMsg reMsg model.reOrder
       in
-        if drag.idx == idx && drag.which == which then
-          style "transform" ((trans drag.direction diffPixels) ++ " translateZ(10px)")
-        else if idx < drag.idx && drag.idx + diffUnits <= idx then
-          style "transform" (trans drag.direction drag.size)
-        else if idx > drag.idx && drag.idx + diffUnits >= idx then
-          style "transform" (trans drag.direction -drag.size)
-        else
-          style "" ""
-    Nothing ->
-      style "" ""
+        ( { model | reOrder = reOrder }, cmd )
 
 
-dragDistancePixels : Drag -> Int
-dragDistancePixels drag =
-  case drag.direction of
-    Horizontal ->
-      round (drag.mouseAt.x - drag.mouseStart.x)
-    Vertical ->
-      round (drag.mouseAt.y - drag.mouseStart.y)
-
-
-dragDistanceUnits : Drag -> Int
-dragDistanceUnits drag =
-  (dragDistancePixels drag) // drag.size
+draggableUpdateFunc : OrderableType -> (Int -> Int -> Animation -> Animation)
+draggableUpdateFunc orderable =
+  case orderable of
+    OrderLayer ->
+      Animation.changeLayerOrder
+    OrderFrame ->
+      Animation.changeFrameOrder
 
 
 toCanvasCoords : Point -> Rect -> Point
 toCanvasCoords screen canvas =
   let center = Rect.center canvas
   in Point (screen.x - center.x) (screen.y - center.y)
-
-
-mouseToPoint : MouseEvent -> Point
-mouseToPoint event =
-  Point event.client.x event.client.y
 
 
 moveLayerCoords : MouseEvent -> FrameLayer -> FrameLayer
@@ -381,14 +283,9 @@ subscriptions : Model -> Sub Msg
 subscriptions model =
   Sub.batch
     [ onResize OnWindowResize
+    , Orderable.subscriptions model.reOrder OrderableMsg
     , if model.playing
       then onAnimationFrameDelta AnimationFrame
-      else Sub.none
-    , if model.drag /= Nothing
-      then Sub.batch
-        [ onMouseMove (Decode.map DragMove mouseEventDecoder)
-        , onMouseUp (Decode.map DragEnd mouseEventDecoder)
-        ]
       else Sub.none
     ]
  
@@ -425,20 +322,20 @@ viewSidebar model =
   let
     button idx layer =
       div
-        [ class "sidebar-layer"
-        , draggableStyle idx DragLayer model.drag
-        ]
+        ( (class "sidebar-layer")
+        :: draggableAttributes idx 30 OrderLayer Vertical OrderableMsg model.reOrder
+        )
         [ a
             [ classList [("button", True), ("button-selected", idx == model.currentLayerIdx)]
             , onClick (SelectLayer idx)
-            , on "mousedown" (Decode.map (DragStart idx 30 DragLayer Vertical) mouseEventDecoder)
-            , preventDefaultOn "selectstart" (Decode.succeed (NoOp, True))
             ]
             [ text layer.name ]
         , a [ class "sidebar-deleteLayer", onClick (DeleteLayer idx) ] []
         ]
   in
-  section [class "sidebar"] (List.indexedMap button model.animation.layers)
+  section
+    [ class "sidebar", containerStyle ]
+    (List.indexedMap button model.animation.layers)
 
 
 viewAnimation : Model -> Html Msg
@@ -523,38 +420,23 @@ viewPlayButton isPlaying =
 viewFrames : Model -> Html Msg
 viewFrames model =
   div [class "frames"]
-    [ div [] (List.indexedMap viewFrame model.animation.frames)
+    [ div [ containerStyle ] (List.indexedMap (viewFrame model.reOrder) model.animation.frames)
     , div [ class "frames-add", onClick NewFrame ] []
     , div [ class "frames-remove", onClick (DeleteFrame model.currentFrameIdx) ] []
     ]
 
 
-viewFrame : Int -> Frame -> Html Msg
-viewFrame idx frame =
-  div [class "frame", onClick (SelectFrame idx)] []
+viewFrame : Maybe (Orderable.State OrderableType) -> Int -> Frame -> Html Msg
+viewFrame reOrder idx frame =
+  div
+    ( [class "frame", onClick (SelectFrame idx) ]
+    ++ draggableAttributes idx 90 OrderFrame Horizontal OrderableMsg reOrder
+    )
+    []
 
 
 
 -- DECODERS
-
-
-mouseEventDecoder : Decode.Decoder MouseEvent
-mouseEventDecoder =
-  Decode.map7 MouseEvent
-    (Decode.field "button" Decode.int)
-    (Decode.field "buttons" Decode.int)
-    (Decode.at [] (decodePoint "movementX" "movementY"))
-    (Decode.at [] (decodePoint "clientX" "clientY"))
-    (Decode.field "altKey" Decode.bool)
-    (Decode.field "ctrlKey" Decode.bool)
-    (Decode.field "metaKey" Decode.bool)
-
-
-decodePoint : String -> String -> Decode.Decoder Point
-decodePoint x y =
-  Decode.map2 Point
-    (Decode.field x Decode.float)
-    (Decode.field y Decode.float)
 
 
 dropDecoder : Decode.Decoder Msg
